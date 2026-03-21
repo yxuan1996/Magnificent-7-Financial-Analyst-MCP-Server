@@ -29,7 +29,7 @@ from contextvars import ContextVar
 from typing import Optional
 
 from fastmcp.server.middleware import Middleware
-from services.auth_service import get_auth_service
+from mcp_server.services.auth_service import get_auth_service
 
 logger = logging.getLogger(__name__)
 

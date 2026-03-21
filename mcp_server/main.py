@@ -45,16 +45,16 @@ import uvicorn
 from fastmcp import FastMCP
 from fastmcp.server.middleware.logging import StructuredLoggingMiddleware
 
-from config import settings
-from auth import AuthMiddleware
-from services.neo4j_service import get_neo4j_service
-from services.pinecone_service import get_pinecone_service
-from services.auth_service import get_auth_service
+from mcp_server.config import settings
+from mcp_server.auth import AuthMiddleware
+from mcp_server.services.neo4j_service import get_neo4j_service
+from mcp_server.services.pinecone_service import get_pinecone_service
+from mcp_server.services.auth_service import get_auth_service
 
-from tools.vector_tools import register_vector_tools
-from tools.financial_tools import register_financial_tools
-from tools.event_tools import register_event_tools
-from tools.people_tools import register_people_tools
+from mcp_server.tools.vector_tools import register_vector_tools
+from mcp_server.tools.financial_tools import register_financial_tools
+from mcp_server.tools.event_tools import register_event_tools
+from mcp_server.tools.people_tools import register_people_tools
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -128,10 +128,10 @@ register_people_tools(mcp)
 
 # Log registered tool names using the public constants from each tool module
 # rather than private FastMCP internals, which vary between versions.
-from tools.vector_tools import TOOL_SEARCH_TEXT, TOOL_SEARCH_TABLES
-from tools.financial_tools import TOOL_GET_FINANCIAL_METRIC, TOOL_COMPARE_YEARS, TOOL_COMPARE_COMPANIES
-from tools.event_tools import TOOL_GET_KEY_DEVELOPMENTS
-from tools.people_tools import TOOL_GET_KEY_PERSONS
+from mcp_server.tools.vector_tools import TOOL_SEARCH_TEXT, TOOL_SEARCH_TABLES
+from mcp_server.tools.financial_tools import TOOL_GET_FINANCIAL_METRIC, TOOL_COMPARE_YEARS, TOOL_COMPARE_COMPANIES
+from mcp_server.tools.event_tools import TOOL_GET_KEY_DEVELOPMENTS
+from mcp_server.tools.people_tools import TOOL_GET_KEY_PERSONS
 
 _REGISTERED_TOOLS = [
     TOOL_SEARCH_TEXT,

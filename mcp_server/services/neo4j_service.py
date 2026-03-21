@@ -23,7 +23,7 @@ from typing import Any, Optional
 
 from neo4j import GraphDatabase, Driver, Session
 
-from config import settings
+from mcp_server.config import settings
 
 logger = logging.getLogger(__name__)
 

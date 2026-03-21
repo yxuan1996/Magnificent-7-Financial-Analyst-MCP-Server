@@ -8,10 +8,21 @@ All secrets live in .env; this module exposes them as typed attributes.
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from pathlib import Path
+from dotenv import load_dotenv
+import os
+
+# 1. Get the absolute path of the directory where this script resides
+current_dir = Path(__file__).parent.resolve()
+
+# 2. Define the path to the .env file in the subdirectory
+env_path = current_dir / '.env'
+
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=env_path,
         env_file_encoding="utf-8",
         extra="ignore",
     )
