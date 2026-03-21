@@ -84,11 +84,27 @@ Required values:
 
 ```bash
 python main.py
-# or
-uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-The server starts on `http://localhost:8000` by default.
+FastMCP starts its built-in HTTP server directly via `mcp.run(transport="http")`.
+No separate uvicorn command is needed. The server starts on `http://localhost:8000` by default.
+
+#### Deploying to Prefect Horizon
+
+Prefect Horizon (and any ASGI host) can import the FastMCP ASGI app directly:
+
+```python
+# prefect_deploy.py  (or your Horizon entry-point)
+from main import mcp
+
+# Expose as a standard ASGI callable
+app = mcp.http_app()
+```
+
+Point Prefect Horizon at `prefect_deploy:app` as the ASGI application.
+
+Alternatively, run `main.py` as a long-lived process inside a Prefect deployment
+and let Horizon manage the process lifecycle.
 
 ### 4. Health check
 

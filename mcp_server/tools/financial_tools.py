@@ -12,32 +12,35 @@ Graph schema used
 
 Tools
 ~~~~~
-- get_financial_metric           → single company, one metric, optional year
-- compare_metric_across_years    → single company, one metric, all years
-- compare_metric_across_companies→ multiple companies, one metric, one year
+- get_financial_metric            → single company, one metric, optional year
+- compare_metric_across_years     → single company, one metric, all years
+- compare_metric_across_companies → multiple companies, one metric, one year
 """
 
 import logging
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP, Context
+from fastmcp import FastMCP
 
-from auth import get_user_context
+from auth import get_current_user
 from services.neo4j_service import get_neo4j_service
 
 logger = logging.getLogger(__name__)
+
+ 
+TOOL_GET_FINANCIAL_METRIC  = "get_financial_metric"
+TOOL_COMPARE_YEARS         = "compare_metric_across_years"
+TOOL_COMPARE_COMPANIES     = "compare_metric_across_companies"
 
 
 def register_financial_tools(mcp: FastMCP) -> None:
     """Register all financial graph tools onto *mcp*."""
 
-    # ------------------------------------------------------------------
     @mcp.tool(name="get_financial_metric")
     async def get_financial_metric(
         ticker: str,
         metric_name: str,
         fiscal_year: Optional[int] = None,
-        ctx: Context = None,
     ) -> dict:
         """
         Retrieve a financial metric value for a single company from
@@ -61,8 +64,8 @@ def register_financial_tools(mcp: FastMCP) -> None:
         dict with keys:
             ticker, metric_name, fiscal_year (if filtered), facts (list)
         """
-        user_ctx = get_user_context(ctx)
-        user_ctx.assert_tickers([ticker])
+        user = get_current_user()
+        user.assert_tickers([ticker])
 
         svc = get_neo4j_service()
         results = svc.get_financial_metric(
@@ -79,12 +82,10 @@ def register_financial_tools(mcp: FastMCP) -> None:
             "facts": results,
         }
 
-    # ------------------------------------------------------------------
     @mcp.tool(name="compare_metric_across_years")
     async def compare_metric_across_years(
         ticker: str,
         metric_name: str,
-        ctx: Context = None,
     ) -> dict:
         """
         Return all available yearly values for a given metric at one company,
@@ -102,8 +103,8 @@ def register_financial_tools(mcp: FastMCP) -> None:
         dict with keys:
             ticker, metric_name, year_count, time_series (list of {fiscal_year, value, unit})
         """
-        user_ctx = get_user_context(ctx)
-        user_ctx.assert_tickers([ticker])
+        user = get_current_user()
+        user.assert_tickers([ticker])
 
         svc = get_neo4j_service()
         results = svc.compare_metric_across_years(
@@ -128,13 +129,11 @@ def register_financial_tools(mcp: FastMCP) -> None:
             "raw": results,
         }
 
-    # ------------------------------------------------------------------
     @mcp.tool(name="compare_metric_across_companies")
     async def compare_metric_across_companies(
         tickers: list[str],
         metric_name: str,
         fiscal_year: int,
-        ctx: Context = None,
     ) -> dict:
         """
         Compare a single financial metric across multiple Magnificent 7
@@ -155,12 +154,11 @@ def register_financial_tools(mcp: FastMCP) -> None:
         dict with keys:
             metric_name, fiscal_year, comparison (list sorted by value desc)
         """
-        user_ctx = get_user_context(ctx)
+        user = get_current_user()
         upper_tickers = [t.upper() for t in tickers]
-        user_ctx.assert_tickers(upper_tickers)
+        user.assert_tickers(upper_tickers)
 
-        # Only query tickers the user is allowed to see
-        allowed_tickers = user_ctx.filter_tickers(upper_tickers)
+        allowed_tickers = user.filter_tickers(upper_tickers)
         if not allowed_tickers:
             raise PermissionError("You do not have access to any of the requested tickers.")
 

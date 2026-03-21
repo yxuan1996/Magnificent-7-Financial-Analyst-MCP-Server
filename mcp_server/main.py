@@ -7,17 +7,29 @@ Startup sequence
 ~~~~~~~~~~~~~~~~
 1. Load settings from .env via config.py
 2. Create the FastMCP application
-3. Mount JWTAuthMiddleware (Supabase Bearer tokens)
-4. Register all tool groups (vector, financial, event, people)
-5. Expose a /health endpoint for liveness probes
-6. Start the Uvicorn server
+3. Attach middleware via mcp.add_middleware()
+4. Register lifespan hooks for service initialisation / teardown
+5. Register all tool groups (vector, financial, event, people)
+6. Start via mcp.run(transport="http")
 
-Usage
-~~~~~
-    python main.py
+Auth flow per tool call
+~~~~~~~~~~~~~~~~~~~~~~~~
+    Client sends Bearer JWT
+        → AuthMiddleware.on_call_tool
+            → Supabase: verify JWT signature + expiry
+            → Supabase RBAC: check role_permissions for tool access
+            → Supabase RBAC: derive allowed tickers from role names
+            → UserContext stored in ContextVar
+        → Tool handler reads UserContext via get_current_user()
 
-Or via uvicorn directly:
-    uvicorn main:app --host 0.0.0.0 --port 8000
+Deployment (Prefect Horizon)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Import the ASGI app directly:
+
+        from main import mcp
+        app = mcp.http_app()   # standard ASGI callable
+
+    Or run main.py as a long-lived process managed by Prefect Horizon.
 """
 
 import logging
@@ -25,15 +37,11 @@ import sys
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-import uvicorn
-from mcp.server.fastmcp import FastMCP
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import JSONResponse
-from starlette.routing import Route
+from fastmcp import FastMCP
+from fastmcp.server.middleware.logging import StructuredLoggingMiddleware
 
 from config import settings
-from auth import JWTAuthMiddleware
+from auth import AuthMiddleware
 from services.neo4j_service import get_neo4j_service
 from services.pinecone_service import get_pinecone_service
 from services.auth_service import get_auth_service
@@ -55,15 +63,15 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Lifespan – initialise / teardown shared services
+# Lifespan — service initialisation and graceful teardown
 # ---------------------------------------------------------------------------
+
 @asynccontextmanager
 async def lifespan(_app) -> AsyncIterator[None]:
     logger.info("🚀  Starting %s …", settings.mcp_server_name)
 
-    # Eagerly initialise singletons to surface connection errors at startup.
     get_auth_service()
-    logger.info("✅  Supabase auth service ready")
+    logger.info("✅  Supabase auth + RBAC service ready")
 
     get_pinecone_service()
     logger.info("✅  Pinecone service ready  (index: %s)", settings.pinecone_index_name)
@@ -73,15 +81,14 @@ async def lifespan(_app) -> AsyncIterator[None]:
 
     yield
 
-    # Teardown
-    svc = get_neo4j_service()
-    svc.close()
+    get_neo4j_service().close()
     logger.info("👋  Neo4j connection closed")
 
 
 # ---------------------------------------------------------------------------
 # FastMCP application
 # ---------------------------------------------------------------------------
+
 mcp = FastMCP(
     name=settings.mcp_server_name,
     instructions=(
@@ -92,54 +99,54 @@ mcp = FastMCP(
         "key leadership information extracted from Form 10-K filings. "
         "Always cite the ticker and fiscal year when presenting financial data."
     ),
+    lifespan=lifespan,
 )
 
-# Register all tool groups
+# ---------------------------------------------------------------------------
+# Middleware  (order matters — applied outermost-first)
+# ---------------------------------------------------------------------------
+# 1. StructuredLoggingMiddleware — logs every tool call with timing
+# 2. AuthMiddleware              — Supabase JWT + RBAC policy enforcement
+
+mcp.add_middleware(StructuredLoggingMiddleware())
+mcp.add_middleware(AuthMiddleware())
+
+logger.info("🔒  AuthMiddleware registered (Supabase JWT + RBAC)")
+
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
 register_vector_tools(mcp)
 register_financial_tools(mcp)
 register_event_tools(mcp)
 register_people_tools(mcp)
 
-logger.info(
-    "📦  Registered tools: %s",
-    [t.name for t in mcp._tools.values()],  # noqa: SLF001
-)
+# Log registered tool names using the public constants from each tool module
+# rather than private FastMCP internals, which vary between versions.
+from tools.vector_tools import TOOL_SEARCH_TEXT, TOOL_SEARCH_TABLES
+from tools.financial_tools import TOOL_GET_FINANCIAL_METRIC, TOOL_COMPARE_YEARS, TOOL_COMPARE_COMPANIES
+from tools.event_tools import TOOL_GET_KEY_DEVELOPMENTS
+from tools.people_tools import TOOL_GET_KEY_PERSONS
+
+_REGISTERED_TOOLS = [
+    TOOL_SEARCH_TEXT,
+    TOOL_SEARCH_TABLES,
+    TOOL_GET_FINANCIAL_METRIC,
+    TOOL_COMPARE_YEARS,
+    TOOL_COMPARE_COMPANIES,
+    TOOL_GET_KEY_DEVELOPMENTS,
+    TOOL_GET_KEY_PERSONS,
+]
+logger.info("📦  Registered tools: %s", _REGISTERED_TOOLS)
 
 
 # ---------------------------------------------------------------------------
-# Health-check endpoint (bypasses JWT middleware)
-# ---------------------------------------------------------------------------
-async def health(_: Request) -> JSONResponse:
-    return JSONResponse({"status": "ok", "server": settings.mcp_server_name})
-
-
-# ---------------------------------------------------------------------------
-# Starlette wrapper with middleware
-# ---------------------------------------------------------------------------
-# FastMCP exposes a Starlette sub-application; we wrap it with our own
-# Starlette app so we can add middleware and extra routes cleanly.
-
-_mcp_app = mcp.get_asgi_app()
-
-app = Starlette(
-    lifespan=lifespan,
-    routes=[
-        Route("/health", health),
-        Route("/{path:path}", _mcp_app),  # forward everything else to FastMCP
-    ],
-)
-
-app.add_middleware(JWTAuthMiddleware)
-
-
-# ---------------------------------------------------------------------------
-# Dev runner
+# Entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    uvicorn.run(
-        "main:app",
+    mcp.run(
+        transport="http",
         host=settings.mcp_server_host,
         port=settings.mcp_server_port,
-        reload=False,
         log_level=settings.mcp_log_level.lower(),
     )

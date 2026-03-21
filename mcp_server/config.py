@@ -16,11 +16,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Supabase
+    # Supabase — authentication (JWT) + authorization (RBAC tables)
     supabase_url: str
     supabase_anon_key: str
-    supabase_service_role_key: str
-    supabase_jwt_secret: str
+    supabase_service_role_key: str  # needed to query RBAC tables server-side
+    supabase_jwt_secret: str        # used to verify JWTs without a round-trip
 
     # Pinecone
     pinecone_api_key: str
@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     mcp_server_port: int = 8000
     mcp_server_name: str = "mag7-financial-analyst"
     mcp_log_level: str = "INFO"
+
+    #OPENAI
+    azure_openai: str
+    azure_openai_endpoint: str
 
 
 @lru_cache

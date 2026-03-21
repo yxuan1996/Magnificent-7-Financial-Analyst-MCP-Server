@@ -18,12 +18,15 @@ import logging
 from enum import Enum
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP, Context
+from fastmcp import FastMCP
 
-from auth import get_user_context
+from auth import get_current_user
 from services.neo4j_service import get_neo4j_service
 
 logger = logging.getLogger(__name__)
+
+ 
+TOOL_GET_KEY_DEVELOPMENTS = "get_key_developments"
 
 
 class DevelopmentCategory(str, Enum):
@@ -44,7 +47,6 @@ def register_event_tools(mcp: FastMCP) -> None:
         ticker: str,
         category: Optional[DevelopmentCategory] = None,
         fiscal_year: Optional[int] = None,
-        ctx: Context = None,
     ) -> dict:
         """
         Retrieve key corporate developments for a company as mentioned in
@@ -57,12 +59,12 @@ def register_event_tools(mcp: FastMCP) -> None:
         category : DevelopmentCategory, optional
             Filter by development type. One of:
 
-            - ``M&A``              – Mergers, acquisitions, divestitures
-            - ``Restructuring``    – Layoffs, reorganisations, facility closures
-            - ``Litigation``       – Lawsuits, settlements, regulatory fines
-            - ``ProductLaunch``    – New products, services, or platform releases
-            - ``RegulatoryAction`` – Government investigations, consent decrees
-            - ``GuidanceChange``   – Forward guidance revisions (up or down)
+            - ``M&A``              - Mergers, acquisitions, divestitures
+            - ``Restructuring``    - Layoffs, reorganisations, facility closures
+            - ``Litigation``       - Lawsuits, settlements, regulatory fines
+            - ``ProductLaunch``    - New products, services, or platform releases
+            - ``RegulatoryAction`` - Government investigations, consent decrees
+            - ``GuidanceChange``   - Forward guidance revisions (up or down)
 
         fiscal_year : int, optional
             Filter to a specific four-digit fiscal year (e.g. 2023).
@@ -77,8 +79,8 @@ def register_event_tools(mcp: FastMCP) -> None:
             title, category, description, date, fiscal_year,
             ticker, company_name
         """
-        user_ctx = get_user_context(ctx)
-        user_ctx.assert_tickers([ticker])
+        user = get_current_user()
+        user.assert_tickers([ticker])
 
         svc = get_neo4j_service()
         results = svc.get_key_developments(
