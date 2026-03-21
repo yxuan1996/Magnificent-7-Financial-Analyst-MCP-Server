@@ -42,6 +42,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 import uvicorn
+from starlette.middleware.cors import CORSMiddleware
 from fastmcp import FastMCP
 from fastmcp.server.middleware.logging import StructuredLoggingMiddleware
 
@@ -157,6 +158,15 @@ logger.info("📦  Registered tools: %s", _REGISTERED_TOOLS)
 #     )
 
 app = mcp.http_app()
+
+# 2. Add the CORS middleware to that app
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Use ["https://inspector.modelcontextprotocol.io"] for better security
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
  
  
 # ---------------------------------------------------------------------------
