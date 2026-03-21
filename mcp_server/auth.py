@@ -238,32 +238,14 @@ class AuthMiddleware(Middleware):
         finally:
             _current_user_var.reset(token_var)
 
-    # ------------------------------------------------------------------
-    # on_list_tools — identity check only
-    # ------------------------------------------------------------------
 
-    async def on_list_tools(self, context, call_next):
-        """
-        Require a valid JWT before the tool list is returned to the client.
-
-        No RBAC queries are made here — listing tools does not expose data,
-        but we still require proof of identity to prevent information leakage
-        about the server's capabilities to unauthenticated callers.
-        """
-        fastmcp_ctx = getattr(context, "context", context)
-
-        token = _extract_bearer_token(fastmcp_ctx)
-        if not token:
-            raise PermissionError(
-                "A valid Bearer token is required to list tools."
-            )
-
-        auth_svc = get_auth_service()
-        try:
-            auth_svc.verify_token(token)
-        except PermissionError:
-            raise
-        except Exception as exc:
-            raise PermissionError(f"Token verification failed: {exc}") from exc
-
-        return await call_next(context)
+    # on_list_tools is intentionally not defined here.
+    #
+    # FastMCP middleware only intercepts hooks that are explicitly implemented.
+    # By omitting on_list_tools, tool discovery is open to any caller — no
+    # Bearer token required.
+    #
+    # This allows MCP clients and inspection tools (e.g. MCP Inspector,
+    # LangChain MultiServerMCPClient) to enumerate tools without needing a
+    # Supabase session.  Authentication is still enforced on every actual
+    # tool *call* via on_call_tool above.

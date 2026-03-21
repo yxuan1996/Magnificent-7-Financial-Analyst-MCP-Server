@@ -41,8 +41,11 @@ import sys
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
+import time
 import uvicorn
+from starlette.requests import Request
 from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
 from fastmcp import FastMCP
 from fastmcp.server.middleware.logging import StructuredLoggingMiddleware
 
@@ -146,6 +149,82 @@ _REGISTERED_TOOLS = [
 logger.info("📦  Registered tools: %s", _REGISTERED_TOOLS)
 
 
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(_: Request) -> JSONResponse:
+    """
+    Returns a JSON object describing the server's current health.
+ 
+    HTTP 200  — server is up; individual services may still be degraded.
+    HTTP 503  — one or more critical services are unreachable.
+ 
+    Response fields:
+        status      "ok" | "degraded"
+        server      server name from settings
+        uptime_s    seconds since the process started
+        services    dict mapping service name → "ok" | "error: <message>"
+    """
+    services: dict = {}
+ 
+    # ── Supabase ────────────────────────────────────────────────────────
+    try:
+        svc = get_auth_service()
+        # A lightweight probe: fetch columns from the roles table (1 row).
+        svc.supabase.table("roles").select("id").limit(1).execute()
+        services["supabase"] = "ok"
+    except Exception as exc:
+        services["supabase"] = f"error: {exc}"
+ 
+    # ── Pinecone ────────────────────────────────────────────────────────
+    try:
+        from services.pinecone_service import get_pinecone_service
+        pc = get_pinecone_service()
+        # describe_index_stats() is the cheapest Pinecone read operation.
+        pc._index.describe_index_stats()
+        services["pinecone"] = "ok"
+    except Exception as exc:
+        services["pinecone"] = f"error: {exc}"
+ 
+    # ── Neo4j ───────────────────────────────────────────────────────────
+    try:
+        neo = get_neo4j_service()
+        neo._run("RETURN 1 AS ok")
+        services["neo4j"] = "ok"
+    except Exception as exc:
+        services["neo4j"] = f"error: {exc}"
+ 
+    all_ok = all(v == "ok" for v in services.values())
+    status_code = 200 if all_ok else 503
+ 
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status":   "ok" if all_ok else "degraded",
+            "server":   settings.mcp_server_name,
+            "uptime_s": round(time.time() - _SERVER_START, 1),
+            "services": services,
+        },
+    )
+
+# ---------------------------------------------------------------------------
+# CORS
+# ---------------------------------------------------------------------------
+# mcp.http_app() builds and caches the internal Starlette app.  Adding
+# CORSMiddleware here means every HTTP response — including MCP endpoints
+# and /health — carries the correct CORS headers.  mcp.run() reuses the
+# same cached app instance, so the middleware is active at runtime.
+ 
+_http_app = mcp.http_app()
+_http_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],    # tighten to specific origins in production
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=False,  # must be False when allow_origins=["*"]
+)
+ 
+logger.info("🌐  CORSMiddleware registered (allow_origins=['*'])")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -159,15 +238,6 @@ if __name__ == "__main__":
 
 # app = mcp.http_app()
 
-# # 2. Add the CORS middleware to that app
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=["*"],  # Use ["https://inspector.modelcontextprotocol.io"] for better security
-#     allow_credentials=True,
-#     allow_methods=["GET", "POST", "OPTIONS"],
-#     allow_headers=["*"],
-# )
- 
  
 # # ---------------------------------------------------------------------------
 # # Entry point
