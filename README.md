@@ -20,7 +20,7 @@ gives AI assistants structured access to annual report data for the
 
 ```
 mcp_server/
-├── main.py                  ← FastMCP app, Starlette wiring, lifespan hooks
+├── main.py                  ← FastMCP app, uvicorn entrypoint, lifespan hooks
 ├── auth.py                  ← JWT middleware + UserContext helpers
 ├── config.py                ← Pydantic-settings (reads .env)
 ├── requirements.txt
@@ -83,28 +83,31 @@ Required values:
 ### 3. Run the server
 
 ```bash
+# Development — run directly
 python main.py
 ```
 
-FastMCP starts its built-in HTTP server directly via `mcp.run(transport="http")`.
-No separate uvicorn command is needed. The server starts on `http://localhost:8000` by default.
+The server starts on `http://localhost:8000` by default.
 
-#### Deploying to Prefect Horizon
+For production, invoke uvicorn directly so you can control workers,
+reload behaviour, and TLS:
 
-Prefect Horizon (and any ASGI host) can import the FastMCP ASGI app directly:
-
-```python
-# prefect_deploy.py  (or your Horizon entry-point)
-from main import mcp
-
-# Expose as a standard ASGI callable
-app = mcp.http_app()
+```bash
+# Production — via uvicorn CLI
+uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
 ```
 
-Point Prefect Horizon at `prefect_deploy:app` as the ASGI application.
+> **Why `--workers 1`?** FastMCP uses in-process `ContextVar` state and
+> singleton service objects (Supabase client, Pinecone index, Neo4j driver)
+> that cannot safely be forked across OS processes. For horizontal scaling,
+> run multiple single-worker instances behind a load balancer (nginx,
+> Caddy, etc.) instead of using multiple uvicorn workers in one process.
 
-Alternatively, run `main.py` as a long-lived process inside a Prefect deployment
-and let Horizon manage the process lifecycle.
+To enable auto-reload during development:
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```
 
 ### 4. Health check
 
@@ -169,15 +172,15 @@ Every request must carry a **Supabase JWT** in the `Authorization` header:
 Authorization: Bearer <token>
 ```
 
-The `JWTAuthMiddleware` in `auth.py`:
+The `AuthMiddleware` in `auth.py`:
 1. Verifies the token signature against `SUPABASE_JWT_SECRET`
-2. Extracts the `sub` (user ID)
-3. Looks up the user's roles from the `user_roles` / `roles` tables
-4. Derives which tickers and which tools the user may access
-5. Stores `user_id` and `allowed_tickers` on `request.state`
+2. Extracts the `sub` (user ID) from the JWT payload
+3. Queries `role_permissions` to confirm the user's role grants access to the requested tool
+4. Derives which tickers the user may access from their role names
+5. Stores the resolved `UserContext` in a `ContextVar` for the duration of the tool call
 
-Every tool reads this state and enforces the restrictions before touching
-any database.
+Every tool calls `get_current_user()` to retrieve the scoped `UserContext`
+and enforces ticker restrictions before touching any database.
 
 ### RBAC Tables (Supabase)
 
