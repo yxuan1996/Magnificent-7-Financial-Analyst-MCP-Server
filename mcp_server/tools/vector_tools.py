@@ -14,9 +14,9 @@ from typing import Optional
 
 from fastmcp import FastMCP
 
-from mcp_server.auth import get_current_user
-from mcp_server.services.pinecone_service import get_pinecone_service
-from mcp_server.services.auth_service import MAG7_TICKERS
+from auth import get_current_user
+from services.pinecone_service import get_pinecone_service
+from services.auth_service import MAG7_TICKERS
 
 logger = logging.getLogger(__name__)
 

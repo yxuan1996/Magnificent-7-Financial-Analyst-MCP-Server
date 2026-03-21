@@ -22,8 +22,8 @@ from typing import Optional
 
 from fastmcp import FastMCP
 
-from mcp_server.auth import get_current_user
-from mcp_server.services.neo4j_service import get_neo4j_service
+from auth import get_current_user
+from services.neo4j_service import get_neo4j_service
 
 logger = logging.getLogger(__name__)
 

@@ -54,7 +54,7 @@ import jwt
 from cachetools import TTLCache
 from supabase import create_client, Client
 
-from mcp_server.config import settings
+from config import settings
 
 logger = logging.getLogger(__name__)
 

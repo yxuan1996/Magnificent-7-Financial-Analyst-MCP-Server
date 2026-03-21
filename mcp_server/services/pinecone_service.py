@@ -15,7 +15,7 @@ from typing import Any, Optional
 from pinecone import Pinecone
 from openai import AzureOpenAI
 
-from mcp_server.config import settings
+from config import settings
 
 logger = logging.getLogger(__name__)
 
