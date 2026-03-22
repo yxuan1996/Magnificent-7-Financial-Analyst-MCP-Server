@@ -20,7 +20,7 @@ from typing import Optional
 
 from fastmcp import FastMCP
 
-from auth import get_current_user
+# from auth import get_current_user
 from services.neo4j_service import get_neo4j_service
 
 logger = logging.getLogger(__name__)
@@ -79,8 +79,8 @@ def register_event_tools(mcp: FastMCP) -> None:
             title, category, description, date, fiscal_year,
             ticker, company_name
         """
-        user = get_current_user()
-        user.assert_tickers([ticker])
+        # user = get_current_user()
+        # user.assert_tickers([ticker])
 
         svc = get_neo4j_service()
         results = svc.get_key_developments(

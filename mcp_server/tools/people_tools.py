@@ -19,7 +19,7 @@ from typing import Optional
 
 from fastmcp import FastMCP
 
-from auth import get_current_user
+# from auth import get_current_user
 from services.neo4j_service import get_neo4j_service
 
 logger = logging.getLogger(__name__)
@@ -71,8 +71,8 @@ def register_people_tools(mcp: FastMCP) -> None:
         Each person item contains:
             name, role, description, ticker, company_name
         """
-        user = get_current_user()
-        user.assert_tickers([ticker])
+        # user = get_current_user()
+        # user.assert_tickers([ticker])
 
         svc = get_neo4j_service()
         results = svc.get_key_persons(

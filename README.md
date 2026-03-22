@@ -36,7 +36,7 @@ mcp_server/
 └── services/
     ├── pinecone_service.py  ← Pinecone index wrapper
     ├── neo4j_service.py     ← Neo4j Cypher query wrapper
-    └── auth_service.py      ← Supabase JWT verification + RBAC
+    └── auth_service.py      ← (placeholder — auth removed)
 ```
 
 ### Knowledge Bases
@@ -69,10 +69,6 @@ Required values:
 
 | Variable | Description |
 |----------|-------------|
-| `SUPABASE_URL` | Your Supabase project URL |
-| `SUPABASE_ANON_KEY` | Supabase anon/public key |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service-role key (for RBAC queries) |
-| `SUPABASE_JWT_SECRET` | JWT secret — found in Supabase → Settings → API → JWT Settings |
 | `PINECONE_API_KEY` | Pinecone API key |
 | `PINECONE_INDEX_NAME` | Name of your Pinecone index |
 | `PINECONE_ENVIRONMENT` | Pinecone environment string |
@@ -89,25 +85,7 @@ python main.py
 
 The server starts on `http://localhost:8000` by default.
 
-For production, invoke uvicorn directly so you can control workers,
-reload behaviour, and TLS:
-
-```bash
-# Production — via uvicorn CLI
-uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
-```
-
-> **Why `--workers 1`?** FastMCP uses in-process `ContextVar` state and
-> singleton service objects (Supabase client, Pinecone index, Neo4j driver)
-> that cannot safely be forked across OS processes. For horizontal scaling,
-> run multiple single-worker instances behind a load balancer (nginx,
-> Caddy, etc.) instead of using multiple uvicorn workers in one process.
-
-To enable auto-reload during development:
-
-```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-```
+The server starts on `http://localhost:8000` by default and requires no authentication.
 
 ### 4. Health check
 
@@ -129,93 +107,33 @@ Add the server to your MCP configuration file (usually
 {
   "mcpServers": {
     "mag7-analyst": {
-      "url": "http://localhost:8000",
-      "headers": {
-        "Authorization": "Bearer <your-supabase-jwt>"
-      }
+      "url": "http://localhost:8000"
     }
   }
 }
 ```
 
-### Programmatic (Python)
+### Programmatic (Python — FastMCP client)
 
 ```python
-import httpx
+from fastmcp import Client
 
-BASE = "http://localhost:8000"
-JWT  = "eyJ..."   # obtain from Supabase Auth
-
-headers = {"Authorization": f"Bearer {JWT}"}
-
-# List available tools
-resp = httpx.post(f"{BASE}/tools/list", headers=headers)
-print(resp.json())
+async with Client("http://localhost:8000") as client:
+    tools = await client.list_tools()
+    result = await client.call_tool("get_financial_metric", {
+        "ticker": "AAPL",
+        "metric_name": "Revenue",
+        "fiscal_year": 2023,
+    })
 ```
 
-### curl (SSE transport)
+### curl
 
 ```bash
-curl -N -H "Authorization: Bearer $JWT" \
-     -H "Content-Type: application/json" \
-     -d '{"method":"tools/list","params":{}}' \
-     http://localhost:8000/sse
+curl http://localhost:8000/health
 ```
 
----
 
-## Authentication & Authorization
-
-Every request must carry a **Supabase JWT** in the `Authorization` header:
-
-```
-Authorization: Bearer <token>
-```
-
-The `AuthMiddleware` in `auth.py`:
-1. Verifies the token signature against `SUPABASE_JWT_SECRET`
-2. Extracts the `sub` (user ID) from the JWT payload
-3. Queries `role_permissions` to confirm the user's role grants access to the requested tool
-4. Derives which tickers the user may access from their role names
-5. Stores the resolved `UserContext` in a `ContextVar` for the duration of the tool call
-
-Every tool calls `get_current_user()` to retrieve the scoped `UserContext`
-and enforces ticker restrictions before touching any database.
-
-### RBAC Tables (Supabase)
-
-```sql
--- Assign tools to roles
-INSERT INTO roles (name) VALUES
-  ('all_access'), ('Apple_only'), ('Microsoft_only'), ...;
-
--- Grant tool access to a role
-INSERT INTO role_permissions (role_id, tool_name)
-SELECT id, 'search_report_text'  FROM roles WHERE name = 'all_access'
-UNION ALL
-SELECT id, 'get_financial_metric' FROM roles WHERE name = 'all_access'
--- ... etc.
-
--- Assign a user a role
-INSERT INTO user_roles (user_id, role_id)
-SELECT '<uuid>', id FROM roles WHERE name = 'Apple_only';
-```
-
-### Ticker Access Rules
-
-| Role | Accessible tickers |
-|------|--------------------|
-| `all_access` | All 7 tickers |
-| `Apple_only` | AAPL |
-| `Microsoft_only` | MSFT |
-| `Google_only` | GOOGL |
-| `Amazon_only` | AMZN |
-| `Nvidia_only` | NVDA |
-| `Meta_only` | META |
-| `Tesla_only` | TSLA |
-
-Users can hold multiple roles (e.g. `Apple_only` + `Microsoft_only` allows
-access to both AAPL and MSFT).
 
 ---
 

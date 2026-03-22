@@ -5,8 +5,8 @@ uvicorn[standard]>=0.29.0
  
 
 # Auth
-pyjwt>=2.8.0
-supabase>=2.4.0
+# pyjwt>=2.8.0
+# supabase>=2.4.0
 
 # Vector DB
 pinecone>=3.0.0

@@ -27,11 +27,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Supabase — authentication (JWT) + authorization (RBAC tables)
-    supabase_url: str
-    supabase_anon_key: str
-    supabase_service_role_key: str  # needed to query RBAC tables server-side
-    supabase_jwt_secret: str        # used to verify JWTs without a round-trip
+    # # Supabase — authentication (JWT) + authorization (RBAC tables)
+    # supabase_url: str
+    # supabase_anon_key: str
+    # supabase_service_role_key: str  # needed to query RBAC tables server-side
+    # supabase_jwt_secret: str        # used to verify JWTs without a round-trip
 
     # Pinecone
     pinecone_api_key: str

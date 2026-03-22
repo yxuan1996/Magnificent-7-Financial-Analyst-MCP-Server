@@ -14,9 +14,10 @@ from typing import Optional
 
 from fastmcp import FastMCP
 
-from auth import get_current_user
+# from auth import get_current_user
 from services.pinecone_service import get_pinecone_service
-from services.auth_service import MAG7_TICKERS
+# from services.auth_service import MAG7_TICKERS
+MAG7_TICKERS: list[str] = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"]
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +58,10 @@ def register_vector_tools(mcp: FastMCP) -> None:
             results : list of hits, each containing:
                 - ticker, fiscal_year, section, page, text, score
         """
-        user = get_current_user()
+        # user = get_current_user()
 
         requested = [t.upper() for t in tickers] if tickers else MAG7_TICKERS
-        user.assert_tickers(requested)
+        # user.assert_tickers(requested)
 
         top_k = max(1, min(top_k, 20))
         svc = get_pinecone_service()
@@ -110,10 +111,10 @@ def register_vector_tools(mcp: FastMCP) -> None:
             results : list of hits, each containing:
                 - ticker, fiscal_year, section, page, table_markdown, score
         """
-        user = get_current_user()
+        # user = get_current_user()
 
         requested = [t.upper() for t in tickers] if tickers else MAG7_TICKERS
-        user.assert_tickers(requested)
+        # user.assert_tickers(requested)
 
         top_k = max(1, min(top_k, 20))
         svc = get_pinecone_service()

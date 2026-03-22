@@ -22,7 +22,7 @@ from typing import Optional
 
 from fastmcp import FastMCP
 
-from auth import get_current_user
+# from auth import get_current_user
 from services.neo4j_service import get_neo4j_service
 
 logger = logging.getLogger(__name__)
@@ -64,8 +64,8 @@ def register_financial_tools(mcp: FastMCP) -> None:
         dict with keys:
             ticker, metric_name, fiscal_year (if filtered), facts (list)
         """
-        user = get_current_user()
-        user.assert_tickers([ticker])
+        # user = get_current_user()
+        # user.assert_tickers([ticker])
 
         svc = get_neo4j_service()
         results = svc.get_financial_metric(
@@ -103,8 +103,8 @@ def register_financial_tools(mcp: FastMCP) -> None:
         dict with keys:
             ticker, metric_name, year_count, time_series (list of {fiscal_year, value, unit})
         """
-        user = get_current_user()
-        user.assert_tickers([ticker])
+        # user = get_current_user()
+        # user.assert_tickers([ticker])
 
         svc = get_neo4j_service()
         results = svc.compare_metric_across_years(
@@ -154,13 +154,14 @@ def register_financial_tools(mcp: FastMCP) -> None:
         dict with keys:
             metric_name, fiscal_year, comparison (list sorted by value desc)
         """
-        user = get_current_user()
+        # user = get_current_user()
         upper_tickers = [t.upper() for t in tickers]
-        user.assert_tickers(upper_tickers)
+        # user.assert_tickers(upper_tickers)
 
-        allowed_tickers = user.filter_tickers(upper_tickers)
-        if not allowed_tickers:
-            raise PermissionError("You do not have access to any of the requested tickers.")
+        allowed_tickers = upper_tickers
+        # allowed_tickers = user.filter_tickers(upper_tickers)
+        # if not allowed_tickers:
+        #     raise PermissionError("You do not have access to any of the requested tickers.")
 
         svc = get_neo4j_service()
         results = svc.compare_metric_across_companies(

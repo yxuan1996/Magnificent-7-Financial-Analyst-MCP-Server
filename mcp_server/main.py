@@ -50,10 +50,10 @@ from fastmcp import FastMCP
 from fastmcp.server.middleware.logging import StructuredLoggingMiddleware
 
 from config import settings
-from auth import AuthMiddleware, JWTHttpMiddleware
+# from auth import AuthMiddleware, JWTHttpMiddleware
 from services.neo4j_service import get_neo4j_service
 from services.pinecone_service import get_pinecone_service
-from services.auth_service import get_auth_service
+# from services.auth_service import get_auth_service
 
 from tools.vector_tools import register_vector_tools
 from tools.financial_tools import register_financial_tools
@@ -79,8 +79,8 @@ logger = logging.getLogger(__name__)
 async def lifespan(_app) -> AsyncIterator[None]:
     logger.info("🚀  Starting %s …", settings.mcp_server_name)
 
-    get_auth_service()
-    logger.info("✅  Supabase auth + RBAC service ready")
+    # get_auth_service()
+    # logger.info("✅  Supabase auth + RBAC service ready")
 
     get_pinecone_service()
     logger.info("✅  Pinecone service ready  (index: %s)", settings.pinecone_index_name)
@@ -118,9 +118,9 @@ mcp = FastMCP(
 # 2. AuthMiddleware              — Supabase JWT + RBAC policy enforcement
 
 mcp.add_middleware(StructuredLoggingMiddleware())
-mcp.add_middleware(AuthMiddleware())
+# mcp.add_middleware(AuthMiddleware())
 
-logger.info("🔒  AuthMiddleware registered (Supabase JWT + RBAC)")
+# logger.info("🔒  AuthMiddleware registered (Supabase JWT + RBAC)")
 
 # ---------------------------------------------------------------------------
 # Tool registration
@@ -165,14 +165,14 @@ async def health_check(_: Request) -> JSONResponse:
     """
     services: dict = {}
  
-    # ── Supabase ────────────────────────────────────────────────────────
-    try:
-        svc = get_auth_service()
-        # A lightweight probe: fetch columns from the roles table (1 row).
-        svc.supabase.table("roles").select("id").limit(1).execute()
-        services["supabase"] = "ok"
-    except Exception as exc:
-        services["supabase"] = f"error: {exc}"
+    # # ── Supabase ────────────────────────────────────────────────────────
+    # try:
+    #     svc = get_auth_service()
+    #     # A lightweight probe: fetch columns from the roles table (1 row).
+    #     svc.supabase.table("roles").select("id").limit(1).execute()
+    #     services["supabase"] = "ok"
+    # except Exception as exc:
+    #     services["supabase"] = f"error: {exc}"
  
     # ── Pinecone ────────────────────────────────────────────────────────
     try:
@@ -215,8 +215,8 @@ async def health_check(_: Request) -> JSONResponse:
  
 _http_app = mcp.http_app()
  
-_http_app.add_middleware(JWTHttpMiddleware)
-logger.info("🔑  JWTHttpMiddleware registered (HTTP-level token extraction)")
+# _http_app.add_middleware(JWTHttpMiddleware)
+# logger.info("🔑  JWTHttpMiddleware registered (HTTP-level token extraction)")
  
 _http_app.add_middleware(
     CORSMiddleware,
