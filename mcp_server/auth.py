@@ -185,7 +185,7 @@ class AuthMiddleware(Middleware):
     by ``JWTHttpMiddleware`` at the HTTP layer earlier in the same request.
     This is reliable across all proxy/deployment configurations.
 
-    As a safety net, it also tries ``context.context.get_http_request()``
+    As a safety net, it also tries ``context.client_context.get_http_request()``
     (the FastMCP native approach) in case JWTHttpMiddleware is not mounted.
 
     Auth steps
@@ -199,8 +199,16 @@ class AuthMiddleware(Middleware):
     """
 
     async def on_call_tool(self, context, call_next):
-        tool_name: str = context.tool_name
-        fastmcp_ctx = context.context
+        # FastMCP passes a MiddlewareContext dataclass to every middleware hook.
+        # The correct attribute paths are:
+        #   context.message.params.name   — the tool name string
+        #   context.client_context        — the FastMCP Context object
+        #                                   (used for the HTTP-request fallback)
+        #
+        # Previous code used context.tool_name / context.context which are
+        # NOT attributes of MiddlewareContext — hence the AttributeError.
+        tool_name: str = context.message.params.name
+        fastmcp_ctx = context.client_context
 
         auth_svc = get_auth_service()
 
