@@ -3,25 +3,36 @@ auth.py
 -------
 FastMCP v3 middleware that enforces the full auth flow on every tool call:
 
-    Supabase JWT verification
-        → Supabase RBAC: check tool permission (role_permissions table)
-        → Supabase RBAC: resolve allowed tickers (role name convention)
-        → UserContext stored in ContextVar
-        → Tool executes
+    HTTP request arrives
+        → JWTHttpMiddleware (Starlette HTTP level)
+            → Extracts Bearer token from Authorization header (reliable)
+            → Stores raw token in _bearer_token_var ContextVar
+        → AuthMiddleware.on_call_tool (MCP protocol level)
+            → Reads token from _bearer_token_var
+            → Supabase: verify JWT signature + expiry
+            → Supabase RBAC: check tool permission (role_permissions table)
+            → Supabase RBAC: resolve allowed tickers (role name convention)
+            → UserContext stored in _current_user_var ContextVar
+        → Tool executes, reads UserContext via get_current_user()
 
-Architecture
-~~~~~~~~~~~~
-FastMCP v3 middleware operates at the MCP protocol level, not the HTTP level.
-Python's ``contextvars`` carry the verified ``UserContext`` through the async
-call chain so tools call ``get_current_user()`` with no extra parameters.
+Why two middleware layers?
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+FastMCP v3 MCP-level middleware (on_call_tool) has indirect access to
+HTTP headers via ``context.context.get_http_request()``.  In practice
+this is unreliable behind reverse proxies (Prefect Horizon, nginx, etc.)
+because the FastMCP Context may not have the HTTP request threaded through
+correctly depending on the version and proxy configuration.
 
-Both authorization checks delegate entirely to ``AuthService`` which queries
-the three Supabase RBAC tables and caches results with a 5-minute TTL.
+JWTHttpMiddleware runs at the Starlette ASGI layer — it always has the
+raw HTTP request with all its original headers, regardless of what sits
+in front of the server.  The extracted token is placed in a ContextVar
+that is visible throughout the entire async call chain (same task).
 
 Middleware hooks
 ~~~~~~~~~~~~~~~~
-- ``on_call_tool``  — full authn + authz guard
-- ``on_list_tools`` — JWT identity check only (no data exposure)
+- ``JWTHttpMiddleware``    — HTTP-level token extraction (Starlette)
+- ``AuthMiddleware``       — MCP-level JWT verification + RBAC (FastMCP)
+- ``on_list_tools``        — intentionally omitted; tool listing is open
 """
 
 import logging
@@ -29,15 +40,24 @@ from contextvars import ContextVar
 from typing import Optional
 
 from fastmcp.server.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
 from services.auth_service import get_auth_service
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Per-request ContextVar
+# ContextVars — set at HTTP layer, read at MCP layer (same async task)
 # ---------------------------------------------------------------------------
-# Set by AuthMiddleware.on_call_tool before calling the next handler.
-# Reset in a ``finally`` block — never leaks between concurrent requests.
+
+# Stores the raw Bearer token string extracted from the HTTP Authorization header.
+# Set by JWTHttpMiddleware, read by AuthMiddleware.on_call_tool.
+_bearer_token_var: ContextVar[Optional[str]] = ContextVar(
+    "_bearer_token_var", default=None
+)
+
+# Stores the fully resolved UserContext after JWT + RBAC checks pass.
+# Set by AuthMiddleware.on_call_tool, read by tool handlers via get_current_user().
 _current_user_var: ContextVar[Optional["UserContext"]] = ContextVar(
     "_current_user_var", default=None
 )
@@ -103,98 +123,112 @@ def get_current_user() -> UserContext:
 
 
 # ---------------------------------------------------------------------------
-# Token extraction (HTTP transport compatible)
+# JWTHttpMiddleware — Starlette HTTP layer (reliable header extraction)
 # ---------------------------------------------------------------------------
 
-def _extract_bearer_token(fastmcp_ctx) -> Optional[str]:
+class JWTHttpMiddleware(BaseHTTPMiddleware):
     """
-    Pull the raw JWT string out of the ``Authorization: Bearer <token>`` header.
+    Starlette BaseHTTPMiddleware that extracts the Bearer token from the
+    HTTP Authorization header and stores it in ``_bearer_token_var``.
 
-    Tries two access patterns to stay compatible across FastMCP minor releases:
-      1. ``ctx.get_http_request()``  — explicit API (FastMCP v3+)
-      2. ``ctx.request``             — legacy attribute fallback
+    This middleware runs at the raw HTTP request level — before FastMCP
+    parses the MCP protocol message — so it has guaranteed access to the
+    original request headers regardless of proxy configuration.
 
-    Returns ``None`` if no Bearer token can be found.
+    The token is stored in a ContextVar rather than on request.state so
+    that it is visible to the MCP-level middleware (AuthMiddleware) which
+    runs deeper in the call chain within the same async task.
     """
-    # Pattern 1 — preferred (FastMCP v3+)
-    get_http_req = getattr(fastmcp_ctx, "get_http_request", None)
-    if callable(get_http_req):
+
+    async def dispatch(self, request: StarletteRequest, call_next):
+        # Extract Bearer token from the Authorization header.
+        token: Optional[str] = None
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[len("bearer "):].strip()
+
+        if token:
+            logger.debug(
+                "JWTHttpMiddleware: Bearer token found for %s %s",
+                request.method,
+                request.url.path,
+            )
+        else:
+            logger.debug(
+                "JWTHttpMiddleware: No Bearer token on %s %s",
+                request.method,
+                request.url.path,
+            )
+
+        # Store in ContextVar for the duration of this request.
+        # The ContextVar is visible to all awaited code in this async task,
+        # including FastMCP's MCP protocol handler and our AuthMiddleware.
+        ctx_token = _bearer_token_var.set(token)
         try:
-            http_req = get_http_req()
-            if http_req is not None:
-                header = http_req.headers.get("authorization", "")
-                if header.lower().startswith("bearer "):
-                    return header[len("bearer "):].strip()
-        except Exception:
-            pass
-
-    # Pattern 2 — legacy fallback
-    http_req = getattr(fastmcp_ctx, "request", None)
-    if http_req is not None:
-        header = getattr(http_req, "headers", {}).get("authorization", "")
-        if header.lower().startswith("bearer "):
-            return header[len("bearer "):].strip()
-
-    return None
+            return await call_next(request)
+        finally:
+            _bearer_token_var.reset(ctx_token)
 
 
 # ---------------------------------------------------------------------------
-# FastMCP v3 Middleware
+# FastMCP v3 MCP-level Middleware
 # ---------------------------------------------------------------------------
 
 class AuthMiddleware(Middleware):
     """
-    Single-service auth middleware backed entirely by Supabase.
+    MCP protocol-level middleware that enforces JWT authentication and
+    Supabase RBAC authorisation on every tool call.
 
-    Step 1 — Authentication
-        Verifies the Supabase JWT (HS256 signature, expiry, audience claim).
-        Extracts the user UUID from the ``sub`` claim.
+    Token acquisition
+    ~~~~~~~~~~~~~~~~~
+    Reads the raw Bearer token from ``_bearer_token_var``, which was set
+    by ``JWTHttpMiddleware`` at the HTTP layer earlier in the same request.
+    This is reliable across all proxy/deployment configurations.
 
-    Step 2 — Tool authorization
-        Queries ``role_permissions`` via ``AuthService.check_tool_access()``:
-        the user must hold at least one role that grants the requested tool.
+    As a safety net, it also tries ``context.context.get_http_request()``
+    (the FastMCP native approach) in case JWTHttpMiddleware is not mounted.
 
-    Step 3 — Ticker authorization
-        Derives allowed tickers from role names via
-        ``AuthService.get_allowed_tickers()``:
-          - ``all_access``     → all MAG7 tickers
-          - ``Apple_only``     → AAPL only
-          - ``Microsoft_only`` → MSFT only
-          - … (union of all roles the user holds)
+    Auth steps
+    ~~~~~~~~~~
+    1. Verify Supabase JWT signature + expiry.
+    2. Check role_permissions: does this user's role grant the tool?
+    3. Derive allowed tickers from role names (all_access, Apple_only, …).
+    4. Store UserContext in ``_current_user_var`` for tool handlers.
 
-    Both steps 2 and 3 are backed by a 5-minute TTL cache in AuthService
-    to avoid redundant Supabase queries within the same session window.
-
-    The resolved ``UserContext`` is stored in a ``ContextVar`` so tool
-    handlers can call ``get_current_user()`` directly.
+    on_list_tools is intentionally not defined — tool discovery is open.
     """
 
-    # ------------------------------------------------------------------
-    # on_call_tool — full auth + authz gate
-    # ------------------------------------------------------------------
-
     async def on_call_tool(self, context, call_next):
-        """
-        Intercepts every tool invocation.
-
-        ``context`` attributes:
-            context.tool_name  — str, name of the tool being called
-            context.arguments  — dict, raw tool arguments
-            context.context    — FastMCP Context object
-        """
         tool_name: str = context.tool_name
         fastmcp_ctx = context.context
 
         auth_svc = get_auth_service()
 
-        # ── Step 1: JWT verification ─────────────────────────────────
-        token = _extract_bearer_token(fastmcp_ctx)
+        # ── Step 1: Get the Bearer token ──────────────────────────────
+        # Primary: read from ContextVar set by JWTHttpMiddleware.
+        token: Optional[str] = _bearer_token_var.get()
+
+        # Safety net: try FastMCP's native HTTP request accessor.
+        # Silently ignored if it fails (proxy stripped headers, etc.).
+        if not token:
+            try:
+                get_http_req = getattr(fastmcp_ctx, "get_http_request", None)
+                if callable(get_http_req):
+                    http_req = get_http_req()
+                    if http_req is not None:
+                        header = http_req.headers.get("authorization", "")
+                        if header.lower().startswith("bearer "):
+                            token = header[len("bearer "):].strip()
+            except Exception as exc:
+                logger.debug("FastMCP get_http_request() fallback failed: %s", exc)
+
         if not token:
             raise PermissionError(
                 "Missing Bearer token. "
-                "Include 'Authorization: Bearer <jwt>' in every request."
+                "Include 'Authorization: Bearer <jwt>' in every MCP request."
             )
 
+        # ── Step 2: Verify the JWT ────────────────────────────────────
         try:
             payload = auth_svc.verify_token(token)
         except PermissionError:
@@ -206,18 +240,15 @@ class AuthMiddleware(Middleware):
         if not user_id:
             raise PermissionError("JWT is missing the required 'sub' claim.")
 
-        # ── Step 2: Tool-level authorization ─────────────────────────
-        # Check role_permissions table: does this user's role set include
-        # a row granting access to tool_name?
+        # ── Step 3: Tool-level RBAC ───────────────────────────────────
         if not auth_svc.check_tool_access(user_id, tool_name):
             raise PermissionError(
-                f"Permission denied: your account is not authorised to "
-                f"call '{tool_name}'. Ask an administrator to update your "
-                f"role permissions in Supabase."
+                f"Permission denied: your account is not authorised to call "
+                f"'{tool_name}'. Ask an administrator to update your role "
+                f"permissions in Supabase."
             )
 
-        # ── Step 3: Ticker-level authorization ───────────────────────
-        # Derive allowed tickers from role names (all_access, Apple_only, …)
+        # ── Step 4: Ticker-level RBAC ─────────────────────────────────
         allowed_tickers = auth_svc.get_allowed_tickers(user_id)
         if not allowed_tickers:
             raise PermissionError(
@@ -231,21 +262,16 @@ class AuthMiddleware(Middleware):
             user_id, tool_name, allowed_tickers,
         )
 
-        # ── Store in ContextVar, call tool, then reset ────────────────
-        token_var = _current_user_var.set(user_ctx)
+        # ── Propagate UserContext, call tool, then reset ──────────────
+        ctx_token = _current_user_var.set(user_ctx)
         try:
             return await call_next(context)
         finally:
-            _current_user_var.reset(token_var)
-
+            _current_user_var.reset(ctx_token)
 
     # on_list_tools is intentionally not defined here.
     #
     # FastMCP middleware only intercepts hooks that are explicitly implemented.
-    # By omitting on_list_tools, tool discovery is open to any caller — no
-    # Bearer token required.
-    #
-    # This allows MCP clients and inspection tools (e.g. MCP Inspector,
-    # LangChain MultiServerMCPClient) to enumerate tools without needing a
-    # Supabase session.  Authentication is still enforced on every actual
+    # Omitting on_list_tools means tool discovery is open to any caller —
+    # no Bearer token required.  Authentication is enforced on every actual
     # tool *call* via on_call_tool above.

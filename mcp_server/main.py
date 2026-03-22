@@ -50,7 +50,7 @@ from fastmcp import FastMCP
 from fastmcp.server.middleware.logging import StructuredLoggingMiddleware
 
 from config import settings
-from auth import AuthMiddleware
+from auth import AuthMiddleware, JWTHttpMiddleware
 from services.neo4j_service import get_neo4j_service
 from services.pinecone_service import get_pinecone_service
 from services.auth_service import get_auth_service
@@ -214,6 +214,10 @@ async def health_check(_: Request) -> JSONResponse:
 # same cached app instance, so the middleware is active at runtime.
  
 _http_app = mcp.http_app()
+ 
+_http_app.add_middleware(JWTHttpMiddleware)
+logger.info("🔑  JWTHttpMiddleware registered (HTTP-level token extraction)")
+ 
 _http_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],    # tighten to specific origins in production
@@ -221,7 +225,6 @@ _http_app.add_middleware(
     allow_headers=["*"],
     allow_credentials=False,  # must be False when allow_origins=["*"]
 )
- 
 logger.info("🌐  CORSMiddleware registered (allow_origins=['*'])")
 
 
