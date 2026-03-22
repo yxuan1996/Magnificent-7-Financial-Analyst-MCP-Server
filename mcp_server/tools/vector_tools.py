@@ -68,7 +68,8 @@ def register_vector_tools(mcp: FastMCP) -> None:
 
         hits = svc.search_report_text(
             query=query,
-            tickers=user.filter_tickers(requested),
+            # tickers=user.filter_tickers(requested),
+            tickers=requested,
             top_k=top_k,
             fiscal_year=fiscal_year,
         )
@@ -121,7 +122,8 @@ def register_vector_tools(mcp: FastMCP) -> None:
 
         hits = svc.search_report_tables(
             query=query,
-            tickers=user.filter_tickers(requested),
+            # tickers=user.filter_tickers(requested),
+            tickers=requested,
             top_k=top_k,
             fiscal_year=fiscal_year,
         )

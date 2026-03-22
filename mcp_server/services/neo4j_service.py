@@ -15,6 +15,20 @@ Key persons / developments schema
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   (:Document)-[:MENTIONS]->(:key_person)
   (:Document)-[:MENTIONS]->(:key_development)
+
+Troubleshooting empty results
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If tool calls return empty lists, the most common cause is a mismatch
+between the node labels / property names used in the Cypher queries and
+what is actually stored in the database.
+
+Use the ``inspect_graph`` MCP tool to discover the real schema:
+    - Node labels present in the database
+    - Relationship types present in the database
+    - Property keys on each node label
+    - Sample Company and Metric nodes
+
+Compare the output against the expected schema above.
 """
 
 import logging
@@ -50,11 +64,117 @@ class Neo4jService:
             session.close()
 
     def _run(self, cypher: str, **params) -> list[dict]:
-        """Execute *cypher* and return results as plain dicts."""
+        """
+        Execute *cypher* and return results as plain Python dicts.
+
+        Uses ``record.data()`` — the officially documented Neo4j Python
+        driver method for converting a Record to a dict — instead of
+        ``dict(record)``, which behaves inconsistently across driver
+        versions because ``Record`` inherits from both ``tuple`` and
+        ``Mapping``.
+
+        Logs the query, parameters, and row count at DEBUG level so that
+        empty results are immediately visible in the server log.
+        """
+        logger.debug(
+            "Neo4j query | params=%s | cypher=%.200s",
+            params,
+            cypher.strip(),
+        )
         with self._session() as session:
             result = session.run(cypher, **params)
-            records = [dict(record) for record in result]
+            # record.data() is the correct, driver-documented way to
+            # produce a plain dict from a neo4j Record object.
+            records = [record.data() for record in result]
+
+        logger.debug("Neo4j query | returned %d row(s)", len(records))
+
+        if not records:
+            logger.warning(
+                "Neo4j returned 0 rows for params=%s — "
+                "check node labels, relationship types, and property names "
+                "against the actual database schema (use the inspect_graph tool).",
+                params,
+            )
+
         return records
+
+    # ------------------------------------------------------------------
+    # Schema introspection  (used by the inspect_graph diagnostic tool)
+    # ------------------------------------------------------------------
+
+    def get_schema(self) -> dict:
+        """
+        Return a summary of the database schema:
+          - node_labels      : list of all label names
+          - relationship_types: list of all relationship type names
+          - node_properties  : {label: [property_key, ...]}
+          - sample_companies : first 5 Company nodes (all properties)
+          - sample_metrics   : first 10 Metric nodes (all properties)
+
+        This method is intentionally broad — it helps diagnose mismatches
+        between the expected schema in the Cypher queries and the real data.
+        """
+        schema: dict = {}
+
+        # Node labels
+        labels_result = self._run("CALL db.labels() YIELD label RETURN label")
+        schema["node_labels"] = [r["label"] for r in labels_result]
+
+        # Relationship types
+        rels_result = self._run(
+            "CALL db.relationshipTypes() YIELD relationshipType "
+            "RETURN relationshipType"
+        )
+        schema["relationship_types"] = [
+            r["relationshipType"] for r in rels_result
+        ]
+
+        # Property keys per node label
+        props: dict = {}
+        for label in schema["node_labels"]:
+            # APOC not assumed — use a cheap LIMIT query instead
+            try:
+                rows = self._run(
+                    f"MATCH (n:`{label}`) RETURN keys(n) AS k LIMIT 1"
+                )
+                props[label] = rows[0]["k"] if rows else []
+            except Exception as exc:
+                props[label] = [f"error: {exc}"]
+        schema["node_properties"] = props
+
+        # Sample Company nodes
+        try:
+            schema["sample_companies"] = self._run(
+                "MATCH (c:Company) RETURN properties(c) AS props LIMIT 5"
+            )
+        except Exception as exc:
+            schema["sample_companies"] = [{"error": str(exc)}]
+
+        # Sample Metric nodes
+        try:
+            schema["sample_metrics"] = self._run(
+                "MATCH (m:Metric) RETURN properties(m) AS props LIMIT 10"
+            )
+        except Exception as exc:
+            schema["sample_metrics"] = [{"error": str(exc)}]
+
+        # Sample FiscalYear nodes
+        try:
+            schema["sample_fiscal_years"] = self._run(
+                "MATCH (fy:FiscalYear) RETURN properties(fy) AS props LIMIT 5"
+            )
+        except Exception as exc:
+            schema["sample_fiscal_years"] = [{"error": str(exc)}]
+
+        return schema
+
+    def run_raw(self, cypher: str) -> list[dict]:
+        """
+        Execute an arbitrary read-only Cypher query and return results.
+        Used by the ``inspect_graph`` diagnostic tool.
+        """
+        return self._run(cypher)
 
     # ------------------------------------------------------------------
     # Financial facts
@@ -66,11 +186,7 @@ class Neo4jService:
         metric_name: str,
         fiscal_year: Optional[int] = None,
     ) -> list[dict]:
-        """
-        Retrieve fact value(s) for a specific metric and company.
-
-        Optional filter on fiscal year.
-        """
+        """Retrieve fact value(s) for a specific metric and company."""
         if fiscal_year is not None:
             cypher = """
             MATCH (c:Company {ticker: $ticker})
@@ -89,7 +205,11 @@ class Neo4jService:
                 doc.id            AS document_id
             ORDER BY fy.year DESC
             """
-            params: dict = {"ticker": ticker.upper(), "metric_name": metric_name, "fiscal_year": fiscal_year}
+            params: dict = {
+                "ticker": ticker.upper(),
+                "metric_name": metric_name,
+                "fiscal_year": fiscal_year,
+            }
         else:
             cypher = """
             MATCH (c:Company {ticker: $ticker})
@@ -117,10 +237,7 @@ class Neo4jService:
         ticker: str,
         metric_name: str,
     ) -> list[dict]:
-        """
-        Return all available year-over-year values for a metric at one company.
-        Results are sorted chronologically so callers can build time-series.
-        """
+        """Return all available year-over-year values for a metric at one company."""
         cypher = """
         MATCH (c:Company {ticker: $ticker})
         MATCH (doc:Document)-[:BELONGS_TO]->(c)
@@ -144,9 +261,7 @@ class Neo4jService:
         metric_name: str,
         fiscal_year: int,
     ) -> list[dict]:
-        """
-        Compare a single metric across multiple companies for a given fiscal year.
-        """
+        """Compare a single metric across multiple companies for a given fiscal year."""
         upper_tickers = [t.upper() for t in tickers]
         cypher = """
         MATCH (c:Company)
@@ -180,10 +295,7 @@ class Neo4jService:
         ticker: str,
         role: Optional[str] = None,
     ) -> list[dict]:
-        """
-        Return key persons mentioned in annual report documents for *ticker*.
-        Optionally filter by *role* (CEO, CFO, COO, Chairperson, BoardMember).
-        """
+        """Return key persons mentioned in annual report documents for *ticker*."""
         if role:
             cypher = """
             MATCH (c:Company {ticker: $ticker})
@@ -226,10 +338,7 @@ class Neo4jService:
         category: Optional[str] = None,
         fiscal_year: Optional[int] = None,
     ) -> list[dict]:
-        """
-        Return key developments mentioned in annual report documents for *ticker*.
-        Optionally filter by *category* and/or *fiscal_year*.
-        """
+        """Return key developments mentioned in annual report documents for *ticker*."""
         conditions = ["c.ticker = $ticker"]
         params: dict = {"ticker": ticker.upper()}
 

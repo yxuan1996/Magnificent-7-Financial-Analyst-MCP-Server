@@ -2,38 +2,26 @@
 main.py
 -------
 Entry point for the Magnificent 7 Financial Analyst MCP server.
- 
+
 Startup sequence
 ~~~~~~~~~~~~~~~~
 1. Load settings from .env via config.py
 2. Create the FastMCP application
-3. Attach middleware via mcp.add_middleware()
-4. Register lifespan hooks for service initialisation / teardown
-5. Register all tool groups (vector, financial, event, people)
-6. Expose ``app`` (standard ASGI callable) for uvicorn
- 
-Auth flow per tool call
-~~~~~~~~~~~~~~~~~~~~~~~~
-    Client sends Bearer JWT
-        → AuthMiddleware.on_call_tool
-            → Supabase: verify JWT signature + expiry
-            → Supabase RBAC: check role_permissions for tool access
-            → Supabase RBAC: derive allowed tickers from role names
-            → UserContext stored in ContextVar
-        → Tool handler reads UserContext via get_current_user()
- 
+3. Register lifespan hooks for service initialisation / teardown
+4. Register all tool groups (vector, financial, event, people)
+5. Add CORS middleware (allow all origins)
+6. Start via mcp.run(transport="http")
+
+
 Running the server
 ~~~~~~~~~~~~~~~~~~
-    # Directly (development)
     python main.py
- 
-    # Via uvicorn CLI (production / behind a reverse proxy)
-    uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
- 
-    Note: use --workers 1. FastMCP maintains in-process state (ContextVar,
-    singleton service objects) that is not safe to share across OS processes.
-    For horizontal scaling, run multiple single-worker instances behind a
-    load balancer instead.
+
+Health check
+~~~~~~~~~~~~
+    GET /health  — no authentication required
+    Returns JSON with server name, status, uptime, and per-service readiness.
+    Suitable for use as a liveness or readiness probe (HTTP 200 = healthy).
 """
 
 import logging
@@ -42,23 +30,21 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 import time
-import uvicorn
-from starlette.requests import Request
-from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import JSONResponse
 from fastmcp import FastMCP
 from fastmcp.server.middleware.logging import StructuredLoggingMiddleware
+from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from config import settings
-# from auth import AuthMiddleware, JWTHttpMiddleware
 from services.neo4j_service import get_neo4j_service
 from services.pinecone_service import get_pinecone_service
-# from services.auth_service import get_auth_service
 
 from tools.vector_tools import register_vector_tools
 from tools.financial_tools import register_financial_tools
 from tools.event_tools import register_event_tools
 from tools.people_tools import register_people_tools
+from tools.graph_tools import register_graph_tools, TOOL_INSPECT_GRAPH, TOOL_RUN_CYPHER
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -79,9 +65,6 @@ logger = logging.getLogger(__name__)
 async def lifespan(_app) -> AsyncIterator[None]:
     logger.info("🚀  Starting %s …", settings.mcp_server_name)
 
-    # get_auth_service()
-    # logger.info("✅  Supabase auth + RBAC service ready")
-
     get_pinecone_service()
     logger.info("✅  Pinecone service ready  (index: %s)", settings.pinecone_index_name)
 
@@ -98,6 +81,9 @@ async def lifespan(_app) -> AsyncIterator[None]:
 # FastMCP application
 # ---------------------------------------------------------------------------
 
+# Record the time the server process started so /health can report uptime.
+_SERVER_START = time.time()
+
 mcp = FastMCP(
     name=settings.mcp_server_name,
     instructions=(
@@ -112,15 +98,9 @@ mcp = FastMCP(
 )
 
 # ---------------------------------------------------------------------------
-# Middleware  (order matters — applied outermost-first)
+# Middleware  (MCP-level)
 # ---------------------------------------------------------------------------
-# 1. StructuredLoggingMiddleware — logs every tool call with timing
-# 2. AuthMiddleware              — Supabase JWT + RBAC policy enforcement
-
 mcp.add_middleware(StructuredLoggingMiddleware())
-# mcp.add_middleware(AuthMiddleware())
-
-# logger.info("🔒  AuthMiddleware registered (Supabase JWT + RBAC)")
 
 # ---------------------------------------------------------------------------
 # Tool registration
@@ -129,6 +109,7 @@ register_vector_tools(mcp)
 register_financial_tools(mcp)
 register_event_tools(mcp)
 register_people_tools(mcp)
+register_graph_tools(mcp)
 
 # Log registered tool names using the public constants from each tool module
 # rather than private FastMCP internals, which vary between versions.
@@ -136,6 +117,7 @@ from tools.vector_tools import TOOL_SEARCH_TEXT, TOOL_SEARCH_TABLES
 from tools.financial_tools import TOOL_GET_FINANCIAL_METRIC, TOOL_COMPARE_YEARS, TOOL_COMPARE_COMPANIES
 from tools.event_tools import TOOL_GET_KEY_DEVELOPMENTS
 from tools.people_tools import TOOL_GET_KEY_PERSONS
+from tools.graph_tools import TOOL_INSPECT_GRAPH, TOOL_RUN_CYPHER
 
 _REGISTERED_TOOLS = [
     TOOL_SEARCH_TEXT,
@@ -145,18 +127,31 @@ _REGISTERED_TOOLS = [
     TOOL_COMPARE_COMPANIES,
     TOOL_GET_KEY_DEVELOPMENTS,
     TOOL_GET_KEY_PERSONS,
+    TOOL_INSPECT_GRAPH,
+    TOOL_RUN_CYPHER,
 ]
 logger.info("📦  Registered tools: %s", _REGISTERED_TOOLS)
 
+# ---------------------------------------------------------------------------
+# Health check endpoint
+# ---------------------------------------------------------------------------
+# Registered as a plain HTTP route on the FastMCP ASGI app.
+# Authentication is NOT required — this endpoint is intended for:
+#   • Deployment health / liveness probes (Kubernetes, Render, Railway …)
+#   • Smoke-testing that the server started correctly after a deploy
+#   • Verifying downstream service connectivity before sending real queries
+#
+# Example:
+#   curl https://your-mcp-server.example.com/health
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(_: Request) -> JSONResponse:
     """
     Returns a JSON object describing the server's current health.
- 
+
     HTTP 200  — server is up; individual services may still be degraded.
     HTTP 503  — one or more critical services are unreachable.
- 
+
     Response fields:
         status      "ok" | "degraded"
         server      server name from settings
@@ -164,16 +159,7 @@ async def health_check(_: Request) -> JSONResponse:
         services    dict mapping service name → "ok" | "error: <message>"
     """
     services: dict = {}
- 
-    # # ── Supabase ────────────────────────────────────────────────────────
-    # try:
-    #     svc = get_auth_service()
-    #     # A lightweight probe: fetch columns from the roles table (1 row).
-    #     svc.supabase.table("roles").select("id").limit(1).execute()
-    #     services["supabase"] = "ok"
-    # except Exception as exc:
-    #     services["supabase"] = f"error: {exc}"
- 
+
     # ── Pinecone ────────────────────────────────────────────────────────
     try:
         from services.pinecone_service import get_pinecone_service
@@ -183,7 +169,7 @@ async def health_check(_: Request) -> JSONResponse:
         services["pinecone"] = "ok"
     except Exception as exc:
         services["pinecone"] = f"error: {exc}"
- 
+
     # ── Neo4j ───────────────────────────────────────────────────────────
     try:
         neo = get_neo4j_service()
@@ -191,10 +177,10 @@ async def health_check(_: Request) -> JSONResponse:
         services["neo4j"] = "ok"
     except Exception as exc:
         services["neo4j"] = f"error: {exc}"
- 
+
     all_ok = all(v == "ok" for v in services.values())
     status_code = 200 if all_ok else 503
- 
+
     return JSONResponse(
         status_code=status_code,
         content={
@@ -205,19 +191,14 @@ async def health_check(_: Request) -> JSONResponse:
         },
     )
 
+
 # ---------------------------------------------------------------------------
-# CORS
+# HTTP-level middleware (Starlette layer)
 # ---------------------------------------------------------------------------
-# mcp.http_app() builds and caches the internal Starlette app.  Adding
-# CORSMiddleware here means every HTTP response — including MCP endpoints
-# and /health — carries the correct CORS headers.  mcp.run() reuses the
-# same cached app instance, so the middleware is active at runtime.
- 
+# Applied to the underlying Starlette ASGI app so that every HTTP response
+# — including /health and all MCP endpoints — carries CORS headers.
+
 _http_app = mcp.http_app()
- 
-# _http_app.add_middleware(JWTHttpMiddleware)
-# logger.info("🔑  JWTHttpMiddleware registered (HTTP-level token extraction)")
- 
 _http_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],    # tighten to specific origins in production
@@ -238,22 +219,3 @@ if __name__ == "__main__":
         port=settings.mcp_server_port,
         log_level=settings.mcp_log_level.lower(),
     )
-
-# app = mcp.http_app()
-
- 
-# # ---------------------------------------------------------------------------
-# # Entry point
-# # ---------------------------------------------------------------------------
-# if __name__ == "__main__":
-#     uvicorn.run(
-#         "main:app",
-#         host=settings.mcp_server_host,
-#         port=settings.mcp_server_port,
-#         log_level=settings.mcp_log_level.lower(),
-#         # Single worker: FastMCP uses in-process ContextVars and singleton
-#         # service objects that must not be forked across OS processes.
-#         # Scale horizontally by running multiple single-worker instances
-#         # behind a load balancer instead.
-#         workers=1,
-#     )
