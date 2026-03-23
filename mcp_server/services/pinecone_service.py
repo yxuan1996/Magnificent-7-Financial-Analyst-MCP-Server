@@ -21,7 +21,7 @@ import logging
 from typing import Any, Optional
 
 from pinecone import Pinecone
-from openai import OpenAI   # used to generate query embeddings
+from openai import AzureOpenAI
 
 from config import settings
 
@@ -44,7 +44,11 @@ class PineconeService:
         pc = Pinecone(api_key=settings.pinecone_api_key)
         self._index = pc.Index(settings.pinecone_index_name)
         # Re-use OpenAI embeddings (swap model/client as needed)
-        self._embed_client = OpenAI()
+        self._embed_client = AzureOpenAI(
+          api_key=settings.azure_openai,
+          azure_endpoint=settings.azure_openai_endpoint,
+          api_version="2024-12-01-preview",
+    )
 
     # ------------------------------------------------------------------
     # Internal helpers
