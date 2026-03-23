@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     #OPENAI
     azure_openai: str
     azure_openai_endpoint: str
+    azure_openai_embeddings_deployment: str = "text-embedding-3-small"
+    azure_openai_api_version: str = "2024-12-01-preview"
+    
 
 
 @lru_cache

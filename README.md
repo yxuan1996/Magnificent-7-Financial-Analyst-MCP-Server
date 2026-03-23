@@ -14,6 +14,8 @@ gives AI assistants structured access to annual report data for the
 | META   | Meta          |
 | TSLA   | Tesla         |
 
+[Data Ingestion for the Underlying Knowledge Base is described in this repo](https://github.com/yxuan1996/Magnificent-7-Financial-Analyst)
+
 ---
 
 ## Architecture
@@ -30,6 +32,7 @@ mcp_server/
 ├── tools/
 │   ├── vector_tools.py      ← search_report_text, search_report_tables
 │   ├── financial_tools.py   ← get_financial_metric, compare_*
+│   ├── graph_tools.py       ← diagnostic and utility tools for Neo4j graph
 │   ├── event_tools.py       ← get_key_developments
 │   └── people_tools.py      ← get_key_persons
 │
@@ -65,27 +68,14 @@ cp .env.example .env
 # Edit .env with your real credentials
 ```
 
-Required values:
-
-| Variable | Description |
-|----------|-------------|
-| `PINECONE_API_KEY` | Pinecone API key |
-| `PINECONE_INDEX_NAME` | Name of your Pinecone index |
-| `PINECONE_ENVIRONMENT` | Pinecone environment string |
-| `NEO4J_URI` | Neo4j Bolt URI (e.g. `bolt://localhost:7687`) |
-| `NEO4J_USERNAME` | Neo4j username |
-| `NEO4J_PASSWORD` | Neo4j password |
-
 ### 3. Run the server
 
 ```bash
 # Development — run directly
-python main.py
+fastmcp run mcp_server/main.py
 ```
 
 The server starts on `http://localhost:8000` by default.
-
-The server starts on `http://localhost:8000` by default and requires no authentication.
 
 ### 4. Health check
 
