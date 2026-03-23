@@ -1,15 +1,13 @@
 """
 graph_tools.py
 --------------
-Diagnostic MCP tools for inspecting the Neo4j graph database.
-
-These tools are intended for development and troubleshooting — specifically
-for diagnosing empty results from the financial/person/development tools.
+Diagnostic and utility MCP tools for the Neo4j graph database.
 
 Tools
 ~~~~~
 - inspect_graph  → node labels, relationship types, property keys, sample data
 - run_cypher     → execute any read-only Cypher query and return raw results
+- search_metrics → fuzzy search the metricNameIndex to discover metric names
 """
 
 import logging
@@ -20,8 +18,9 @@ from services.neo4j_service import get_neo4j_service
 
 logger = logging.getLogger(__name__)
 
-TOOL_INSPECT_GRAPH = "inspect_graph"
-TOOL_RUN_CYPHER    = "run_cypher"
+TOOL_INSPECT_GRAPH  = "inspect_graph"
+TOOL_RUN_CYPHER     = "run_cypher"
+TOOL_SEARCH_METRICS = "search_metrics"
 
 
 def register_graph_tools(mcp: FastMCP) -> None:
@@ -82,27 +81,25 @@ def register_graph_tools(mcp: FastMCP) -> None:
         cypher : str
             A read-only Cypher query. Examples:
 
-            -- Count all nodes by label
-            MATCH (n) RETURN labels(n) AS label, count(n) AS count ORDER BY count DESC
+            Count all nodes by label:
+                MATCH (n) RETURN labels(n) AS label, count(n) AS count ORDER BY count DESC
 
-            -- See all properties on Company nodes
-            MATCH (c:Company) RETURN properties(c) LIMIT 10
+            See all properties on Company nodes:
+                MATCH (c:Company) RETURN properties(c) LIMIT 10
 
-            -- Check whether AAPL exists
-            MATCH (c:Company) WHERE c.ticker = "AAPL" RETURN c LIMIT 1
+            Check whether AAPL exists:
+                MATCH (c:Company) WHERE c.ticker = "AAPL" RETURN c LIMIT 1
 
-            -- Trace the path from Company to Metric
-            MATCH p = (c:Company)-[*1..4]-(m:Metric)
-            WHERE c.ticker = "AAPL"
-            RETURN [n in nodes(p) | labels(n)] AS node_labels,
-                   [r in relationships(p) | type(r)] AS rel_types
-            LIMIT 5
+            Find all metric names available for AAPL:
+                MATCH (c:Company {ticker: "AAPL"})
+                MATCH (doc:Document)-[:BELONGS_TO]->(c)
+                MATCH (doc)-[:REPORTS]->(fact:Fact)-[:FOR_METRIC]->(m:Metric)
+                RETURN DISTINCT m.name AS metric ORDER BY metric
 
-            -- Find all metric names available for AAPL
-            MATCH (c:Company {ticker: "AAPL"})
-            MATCH (doc:Document)-[:BELONGS_TO]->(c)
-            MATCH (doc)-[:REPORTS]->(fact:Fact)-[:FOR_METRIC]->(m:Metric)
-            RETURN DISTINCT m.name AS metric ORDER BY metric
+            Test the metricNameIndex directly:
+                CALL db.index.fulltext.queryNodes("metricNameIndex", "*revenue*")
+                YIELD node, score
+                RETURN node.name, score ORDER BY score DESC LIMIT 10
 
         Returns
         -------
@@ -117,3 +114,64 @@ def register_graph_tools(mcp: FastMCP) -> None:
         except Exception as exc:
             logger.error("run_cypher error: %s", exc)
             return {"row_count": 0, "rows": [], "error": str(exc)}
+
+    @mcp.tool(name=TOOL_SEARCH_METRICS)
+    async def search_metrics(
+        metric_name: str,
+        limit: int = 10,
+    ) -> dict:
+        """
+        Search the ``metricNameIndex`` fulltext index to discover metric names
+        that approximately match the input.
+
+        Use this tool **before** calling ``get_financial_metric`` or
+        ``compare_metric_across_years`` to confirm the exact metric name
+        stored in the database, especially when results come back empty.
+
+        The search uses the same wildcard + fuzzy (edit-distance 2) strategy
+        as the financial tools:
+            ``*<term>*  OR  <term>~2``
+
+        Parameters
+        ----------
+        metric_name : str
+            Approximate metric name to search for, e.g. ``"revenue"``,
+            ``"net income"``, ``"eps"``, ``"cash flow"``.
+        limit : int
+            Maximum number of matches to return (default 10).
+
+        Returns
+        -------
+        dict with keys:
+            query        : str   (the Lucene query that was run)
+            match_count  : int
+            matches      : list of {metric_name, unit, score}
+                           sorted by relevance score descending
+
+        Example
+        -------
+        Input:  metric_name="rev"
+        Output matches might include:
+            - "Revenue"            score=2.1
+            - "Net Revenue"        score=1.8
+            - "Revenue Growth"     score=1.5
+        """
+        svc = get_neo4j_service()
+        lucene_query = svc._build_fulltext_metric_query(metric_name)
+
+        try:
+            matches = svc.search_metric_names(metric_name, limit=limit)
+        except Exception as exc:
+            logger.error("search_metrics error: %s", exc)
+            return {
+                "query": lucene_query,
+                "match_count": 0,
+                "matches": [],
+                "error": str(exc),
+            }
+
+        return {
+            "query": lucene_query,
+            "match_count": len(matches),
+            "matches": matches,
+        }

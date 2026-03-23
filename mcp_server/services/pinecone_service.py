@@ -5,6 +5,14 @@ Wraps the Pinecone client and provides typed search helpers for:
   - Paragraph text chunks  (metadata key: "text")
   - Table chunks           (metadata key: "table_markdown")
 
+Metadata keys
+~~~~~~~~~~~~~
+  company_ticker : str   — MAG7 ticker symbol (e.g. "AAPL")
+  chunk_type     : str   — "paragraph" or "table"
+  fiscal_year    : int   — four-digit year
+  text           : str   — paragraph content (paragraph chunks only)
+  table_markdown : str   — Markdown table (table chunks only)
+
 Both search methods accept an optional *tickers* filter so that only
 documents belonging to allowed companies are returned.
 """
@@ -13,14 +21,15 @@ import logging
 from typing import Any, Optional
 
 from pinecone import Pinecone
-from openai import AzureOpenAI
+from openai import OpenAI   # used to generate query embeddings
 
 from config import settings
 
 logger = logging.getLogger(__name__)
 
 # Metadata field that identifies which company a chunk belongs to.
-TICKER_METADATA_KEY = "ticker"
+# Must match the key used when the index was populated.
+TICKER_METADATA_KEY = "company_ticker"
 
 # Metadata field that distinguishes chunk types.
 CHUNK_TYPE_KEY = "chunk_type"
@@ -35,11 +44,7 @@ class PineconeService:
         pc = Pinecone(api_key=settings.pinecone_api_key)
         self._index = pc.Index(settings.pinecone_index_name)
         # Re-use OpenAI embeddings (swap model/client as needed)
-        self._embed_client =  AzureOpenAI(
-            api_key=settings.azure_openai,
-            azure_endpoint=settings.azure_openai_endpoint,
-            api_version="2024-12-01-preview",
-        )
+        self._embed_client = OpenAI()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -68,7 +73,7 @@ class PineconeService:
         return {
             "id": match.id,
             "score": round(match.score, 4),
-            "ticker": meta.get("ticker"),
+            "ticker": meta.get("company_ticker"),  # stored as company_ticker in Pinecone
             "fiscal_year": meta.get("fiscal_year"),
             "document_id": meta.get("document_id"),
             "page": meta.get("page"),

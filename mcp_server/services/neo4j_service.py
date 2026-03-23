@@ -11,6 +11,13 @@ Financial facts schema
   (:Document)-[:BELONGS_TO]->(:FiscalYear)
   (:Document)-[:REPORTS]->(:Fact)-[:FOR_METRIC]->(:Metric)
 
+Fulltext index
+~~~~~~~~~~~~~~
+  A fulltext index named ``metricNameIndex`` is assumed to exist on
+  ``Metric.name``.  All metric lookups use this index with wildcard +
+  fuzzy (edit-distance 2) matching so that imprecise names like
+  "rev" or "net_income" still resolve to the best matching metric.
+
 Key persons / developments schema
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   (:Document)-[:MENTIONS]->(:key_person)
@@ -55,6 +62,39 @@ class Neo4jService:
     def close(self) -> None:
         self._driver.close()
 
+    # ------------------------------------------------------------------
+    # Fulltext metric query helper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_fulltext_metric_query(metric_name: str) -> str:
+        """
+        Build a Lucene query string for the ``metricNameIndex`` fulltext index.
+
+        Strategy:
+        - Wildcard clause   ``*<term>*``  — substring match (high recall)
+        - Fuzzy clause      ``<term>~2``  — edit-distance 2 (typo tolerance)
+
+        For single-word inputs (e.g. "Revenue"):
+            ``*revenue* OR revenue~2``
+
+        For multi-word inputs (e.g. "Net Income"):
+            ``*net income* OR (net~2 AND income~2)``
+            The AND ensures both words are approximately present.
+
+        The fulltext index query returns nodes with a relevance ``score``;
+        callers should ORDER BY that score DESC to surface the best match.
+        """
+        term = metric_name.strip().lower()
+        words = term.split()
+
+        if len(words) == 1:
+            return f"*{term}* OR {term}~2"
+
+        # Multi-word: wildcard on the whole phrase + per-word fuzzy
+        word_fuzzy = " AND ".join(f"{w}~2" for w in words)
+        return f"*{term}* OR ({word_fuzzy})"
+
     @contextmanager
     def _session(self):
         session: Session = self._driver.session(database=self._database)
@@ -98,6 +138,167 @@ class Neo4jService:
             )
 
         return records
+
+    # ------------------------------------------------------------------
+    # Fuzzy financial metric queries  (uses metricNameIndex fulltext index)
+    # ------------------------------------------------------------------
+    #
+    # These methods replace the exact toLower() match with a fulltext
+    # index lookup.  Results are sorted by metric relevance score first
+    # so the best-matching metric surfaces at the top even when the
+    # caller's spelling differs from the stored name.
+    #
+    # The ``metric_score`` column in each result row is the Lucene
+    # relevance score returned by db.index.fulltext.queryNodes().
+
+    def get_financial_metric(
+        self,
+        ticker: str,
+        metric_name: str,
+        fiscal_year: Optional[int] = None,
+    ) -> list[dict]:
+        """
+        Retrieve fact value(s) for a metric, using fuzzy fulltext matching
+        on the metric name via ``metricNameIndex``.
+        """
+        metric_query = self._build_fulltext_metric_query(metric_name)
+
+        if fiscal_year is not None:
+            cypher = """
+            CALL db.index.fulltext.queryNodes("metricNameIndex", $metric_query)
+            YIELD node AS m, score AS metric_score
+            MATCH (c:Company {ticker: $ticker})
+            MATCH (doc:Document)-[:BELONGS_TO]->(c)
+            MATCH (doc)-[:BELONGS_TO]->(fy:FiscalYear {year: $fiscal_year})
+            MATCH (doc)-[:REPORTS]->(fact:Fact)-[:FOR_METRIC]->(m)
+            RETURN
+                c.ticker          AS ticker,
+                c.name            AS company_name,
+                fy.year           AS fiscal_year,
+                m.name            AS metric,
+                m.unit            AS unit,
+                fact.value        AS value,
+                fact.period       AS period,
+                doc.id            AS document_id,
+                metric_score      AS search_score
+            ORDER BY metric_score DESC, fy.year DESC
+            """
+            params: dict = {
+                "ticker": ticker.upper(),
+                "metric_query": metric_query,
+                "fiscal_year": fiscal_year,
+            }
+        else:
+            cypher = """
+            CALL db.index.fulltext.queryNodes("metricNameIndex", $metric_query)
+            YIELD node AS m, score AS metric_score
+            MATCH (c:Company {ticker: $ticker})
+            MATCH (doc:Document)-[:BELONGS_TO]->(c)
+            MATCH (doc)-[:BELONGS_TO]->(fy:FiscalYear)
+            MATCH (doc)-[:REPORTS]->(fact:Fact)-[:FOR_METRIC]->(m)
+            RETURN
+                c.ticker          AS ticker,
+                c.name            AS company_name,
+                fy.year           AS fiscal_year,
+                m.name            AS metric,
+                m.unit            AS unit,
+                fact.value        AS value,
+                fact.period       AS period,
+                doc.id            AS document_id,
+                metric_score      AS search_score
+            ORDER BY metric_score DESC, fy.year DESC
+            """
+            params = {
+                "ticker": ticker.upper(),
+                "metric_query": metric_query,
+            }
+
+        return self._run(cypher, **params)
+
+    def compare_metric_across_years(
+        self,
+        ticker: str,
+        metric_name: str,
+    ) -> list[dict]:
+        """
+        Return all available year-over-year values for a metric at one company,
+        using fuzzy fulltext matching on the metric name.
+        Results are sorted chronologically within each matched metric.
+        """
+        metric_query = self._build_fulltext_metric_query(metric_name)
+        cypher = """
+        CALL db.index.fulltext.queryNodes("metricNameIndex", $metric_query)
+        YIELD node AS m, score AS metric_score
+        MATCH (c:Company {ticker: $ticker})
+        MATCH (doc:Document)-[:BELONGS_TO]->(c)
+        MATCH (doc)-[:BELONGS_TO]->(fy:FiscalYear)
+        MATCH (doc)-[:REPORTS]->(fact:Fact)-[:FOR_METRIC]->(m)
+        RETURN
+            c.ticker      AS ticker,
+            c.name        AS company_name,
+            fy.year       AS fiscal_year,
+            m.name        AS metric,
+            m.unit        AS unit,
+            fact.value    AS value,
+            metric_score  AS search_score
+        ORDER BY metric_score DESC, fy.year ASC
+        """
+        return self._run(cypher, ticker=ticker.upper(), metric_query=metric_query)
+
+    def compare_metric_across_companies(
+        self,
+        tickers: list[str],
+        metric_name: str,
+        fiscal_year: int,
+    ) -> list[dict]:
+        """
+        Compare a single metric across multiple companies for a given fiscal year,
+        using fuzzy fulltext matching on the metric name.
+        """
+        upper_tickers = [t.upper() for t in tickers]
+        metric_query = self._build_fulltext_metric_query(metric_name)
+        cypher = """
+        CALL db.index.fulltext.queryNodes("metricNameIndex", $metric_query)
+        YIELD node AS m, score AS metric_score
+        MATCH (c:Company)
+        WHERE c.ticker IN $tickers
+        MATCH (doc:Document)-[:BELONGS_TO]->(c)
+        MATCH (doc)-[:BELONGS_TO]->(fy:FiscalYear {year: $fiscal_year})
+        MATCH (doc)-[:REPORTS]->(fact:Fact)-[:FOR_METRIC]->(m)
+        RETURN
+            c.ticker      AS ticker,
+            c.name        AS company_name,
+            fy.year       AS fiscal_year,
+            m.name        AS metric,
+            m.unit        AS unit,
+            fact.value    AS value,
+            metric_score  AS search_score
+        ORDER BY metric_score DESC, fact.value DESC
+        """
+        return self._run(
+            cypher,
+            tickers=upper_tickers,
+            metric_query=metric_query,
+            fiscal_year=fiscal_year,
+        )
+
+    def search_metric_names(self, metric_name: str, limit: int = 10) -> list[dict]:
+        """
+        Search the ``metricNameIndex`` fulltext index for metric names that
+        approximately match *metric_name*.
+
+        Returns up to *limit* matching Metric nodes sorted by relevance score.
+        Used by the ``search_metrics`` diagnostic tool.
+        """
+        metric_query = self._build_fulltext_metric_query(metric_name)
+        cypher = """
+        CALL db.index.fulltext.queryNodes("metricNameIndex", $metric_query)
+        YIELD node AS m, score
+        RETURN m.name AS metric_name, m.unit AS unit, score
+        ORDER BY score DESC
+        LIMIT $limit
+        """
+        return self._run(cypher, metric_query=metric_query, limit=limit)
 
     # ------------------------------------------------------------------
     # Schema introspection  (used by the inspect_graph diagnostic tool)
@@ -175,116 +376,6 @@ class Neo4jService:
         Used by the ``inspect_graph`` diagnostic tool.
         """
         return self._run(cypher)
-
-    # ------------------------------------------------------------------
-    # Financial facts
-    # ------------------------------------------------------------------
-
-    def get_financial_metric(
-        self,
-        ticker: str,
-        metric_name: str,
-        fiscal_year: Optional[int] = None,
-    ) -> list[dict]:
-        """Retrieve fact value(s) for a specific metric and company."""
-        if fiscal_year is not None:
-            cypher = """
-            MATCH (c:Company {ticker: $ticker})
-            MATCH (doc:Document)-[:BELONGS_TO]->(c)
-            MATCH (doc)-[:BELONGS_TO]->(fy:FiscalYear {year: $fiscal_year})
-            MATCH (doc)-[:REPORTS]->(fact:Fact)-[:FOR_METRIC]->(m:Metric)
-            WHERE toLower(m.name) = toLower($metric_name)
-            RETURN
-                c.ticker          AS ticker,
-                c.name            AS company_name,
-                fy.year           AS fiscal_year,
-                m.name            AS metric,
-                m.unit            AS unit,
-                fact.value        AS value,
-                fact.period       AS period,
-                doc.id            AS document_id
-            ORDER BY fy.year DESC
-            """
-            params: dict = {
-                "ticker": ticker.upper(),
-                "metric_name": metric_name,
-                "fiscal_year": fiscal_year,
-            }
-        else:
-            cypher = """
-            MATCH (c:Company {ticker: $ticker})
-            MATCH (doc:Document)-[:BELONGS_TO]->(c)
-            MATCH (doc)-[:BELONGS_TO]->(fy:FiscalYear)
-            MATCH (doc)-[:REPORTS]->(fact:Fact)-[:FOR_METRIC]->(m:Metric)
-            WHERE toLower(m.name) = toLower($metric_name)
-            RETURN
-                c.ticker          AS ticker,
-                c.name            AS company_name,
-                fy.year           AS fiscal_year,
-                m.name            AS metric,
-                m.unit            AS unit,
-                fact.value        AS value,
-                fact.period       AS period,
-                doc.id            AS document_id
-            ORDER BY fy.year DESC
-            """
-            params = {"ticker": ticker.upper(), "metric_name": metric_name}
-
-        return self._run(cypher, **params)
-
-    def compare_metric_across_years(
-        self,
-        ticker: str,
-        metric_name: str,
-    ) -> list[dict]:
-        """Return all available year-over-year values for a metric at one company."""
-        cypher = """
-        MATCH (c:Company {ticker: $ticker})
-        MATCH (doc:Document)-[:BELONGS_TO]->(c)
-        MATCH (doc)-[:BELONGS_TO]->(fy:FiscalYear)
-        MATCH (doc)-[:REPORTS]->(fact:Fact)-[:FOR_METRIC]->(m:Metric)
-        WHERE toLower(m.name) = toLower($metric_name)
-        RETURN
-            c.ticker    AS ticker,
-            c.name      AS company_name,
-            fy.year     AS fiscal_year,
-            m.name      AS metric,
-            m.unit      AS unit,
-            fact.value  AS value
-        ORDER BY fy.year ASC
-        """
-        return self._run(cypher, ticker=ticker.upper(), metric_name=metric_name)
-
-    def compare_metric_across_companies(
-        self,
-        tickers: list[str],
-        metric_name: str,
-        fiscal_year: int,
-    ) -> list[dict]:
-        """Compare a single metric across multiple companies for a given fiscal year."""
-        upper_tickers = [t.upper() for t in tickers]
-        cypher = """
-        MATCH (c:Company)
-        WHERE c.ticker IN $tickers
-        MATCH (doc:Document)-[:BELONGS_TO]->(c)
-        MATCH (doc)-[:BELONGS_TO]->(fy:FiscalYear {year: $fiscal_year})
-        MATCH (doc)-[:REPORTS]->(fact:Fact)-[:FOR_METRIC]->(m:Metric)
-        WHERE toLower(m.name) = toLower($metric_name)
-        RETURN
-            c.ticker    AS ticker,
-            c.name      AS company_name,
-            fy.year     AS fiscal_year,
-            m.name      AS metric,
-            m.unit      AS unit,
-            fact.value  AS value
-        ORDER BY fact.value DESC
-        """
-        return self._run(
-            cypher,
-            tickers=upper_tickers,
-            metric_name=metric_name,
-            fiscal_year=fiscal_year,
-        )
 
     # ------------------------------------------------------------------
     # Key persons
